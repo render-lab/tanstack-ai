@@ -29,7 +29,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
+  // The fake writes the overlay to the real path; keep tests independent.
+  await rm(ENV_FILE, { force: true })
 })
+
+const ENV_FILE = '/tmp/tsai/env'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const lines = async (path: string) =>
@@ -77,6 +81,50 @@ describe('process', () => {
 
   it('rejects bash read-only names, which would stop the command', () => {
     expect(() => envFileContent({ UID: '1' })).toThrow(/invalid env var name/)
+  })
+
+  it('a rejected env.set leaves the overlay usable', async () => {
+    await expect(handle.env.set({ 'BAD-NAME': 'x' })).rejects.toThrow()
+    await handle.env.set({ B: '2' })
+    expect((await handle.process.exec('echo $B')).stdout).toBe('2\n')
+  })
+
+  it('concurrent env.set calls write one file with every var', async () => {
+    await Promise.all([handle.env.set({ A: '1' }), handle.env.set({ B: '2' })])
+    const paths = new Set(
+      fake.client.upload.mock.calls.map((call: Array<unknown>) => call[1]),
+    )
+    expect([...paths]).toEqual([ENV_FILE])
+    expect((await handle.process.exec('echo $A$B')).stdout).toBe('12\n')
+  })
+
+  it('a kill before a slow start stops the command (no env)', async () => {
+    const marker = join(dir, 'started')
+    const exec = fake.client.exec.getMockImplementation()!
+    fake.client.exec.mockImplementationOnce(async (...args: Array<any>) => {
+      // The command reaches the sandbox after killCommand's 2 s wait.
+      await sleep(2500)
+      return exec(...args)
+    })
+    const proc = await handle.process.spawn(`touch ${marker}`)
+    await sleep(50)
+    await proc.kill()
+    expect(await proc.wait()).toBe(143)
+    await expect(stat(marker)).rejects.toThrow()
+  }, 10_000)
+
+  it('deletes the per-call env file once the command has read it', async () => {
+    const proc = await handle.process.spawn('sleep 0.5; echo $T', {
+      env: { T: 'tok' },
+    })
+    await sleep(250)
+    const callFile = fake.client.upload.mock.calls
+      .map((call: Array<unknown>) => String(call[1]))
+      .find((path: string) => path.endsWith('.env'))!
+    await expect(stat(callFile)).rejects.toThrow()
+    const out: Array<string> = []
+    for await (const chunk of proc.stdout) out.push(chunk)
+    expect(out.join('')).toBe('tok\n')
   })
 
   it('drops the rest of a stream once it passes the cap', async () => {
@@ -230,7 +278,7 @@ describe('capabilities', () => {
 
   it('removes the env file during the capture and restores it after', async () => {
     await handle.env.set({ SECRET: 'sk-1' })
-    const envFile = String(fake.client.upload.mock.calls[0][1])
+    const envFile = ENV_FILE
     let presentAtCapture = true
     fake.client.snapshots.create.mockImplementationOnce(async () => {
       presentAtCapture = await stat(envFile).then(
@@ -242,7 +290,51 @@ describe('capabilities', () => {
     await handle.snapshot('after-setup')
     expect(presentAtCapture).toBe(false)
     expect(await readFile(envFile, 'utf8')).toContain('sk-1')
-    await rm(envFile, { force: true })
+  })
+
+  it("removes an earlier handle's env file too, and wakes the sandbox first", async () => {
+    await handle.env.set({ SECRET: 'sk-old' })
+    const resumed = new RenderHandle({
+      client: fake.sdk,
+      id: 'sbx-test',
+      workdir: dir,
+      snapshotKind: 'filesystem',
+    })
+    let presentAtCapture = true
+    fake.client.snapshots.create.mockImplementationOnce(async () => {
+      presentAtCapture = await stat(ENV_FILE).then(
+        () => true,
+        () => false,
+      )
+      return { id: 'snp-1' }
+    })
+    const execsBefore = fake.client.exec.mock.calls.length
+    await resumed.snapshot()
+    expect(presentAtCapture).toBe(false)
+    expect(fake.client.exec.mock.calls.length).toBeGreaterThan(execsBefore)
+  })
+
+  it('keeps the ref when the env write-back fails, and rewrites it before the next command', async () => {
+    await handle.env.set({ SECRET: 'sk-1' })
+    fake.client.upload.mockRejectedValueOnce(new Error('transient 502'))
+    expect(await handle.snapshot('s')).toEqual({ id: 'snp-1', label: 's' })
+    expect((await handle.process.exec('echo $SECRET')).stdout).toBe('sk-1\n')
+  })
+
+  it('a command started during the capture waits for it and keeps its env', async () => {
+    await handle.env.set({ SECRET: 'sk-1' })
+    let capturing!: () => void
+    const started = new Promise<void>((resolve) => (capturing = resolve))
+    fake.client.snapshots.create.mockImplementationOnce(async () => {
+      capturing()
+      await sleep(300)
+      return { id: 'snp-1' }
+    })
+    const snap = handle.snapshot()
+    await started
+    const r = await handle.process.exec('echo $SECRET')
+    await snap
+    expect(r).toMatchObject({ stdout: 'sk-1\n', exitCode: 0 })
   })
 
   it('keeps the snapshot name within 64 characters and the full label in the ref', async () => {

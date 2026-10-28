@@ -49,6 +49,12 @@ const KILL_SETTLE_MS = 12_000
 const PGID_DIR = '/tmp/tsai'
 
 /**
+ * The env overlay, one path per sandbox: a later handle (after resume)
+ * overwrites an earlier one's secrets instead of leaving them on disk.
+ */
+const ENV_FILE = `${PGID_DIR}/env`
+
+/**
  * Capability descriptor for a Render sandbox.
  *
  * - `killableProcesses`: every command records its process group and `kill()`
@@ -110,8 +116,11 @@ export function envFileContent(env: Record<string, string>): string {
 /**
  * Wrap `command` so its process group is recorded in `pgidFile` while it
  * runs. Each Render exec shell is already its own process-group leader
- * (measured), so `$$` is the group id and the inner `bash -c` joins it.
- * `envFiles` are sourced in order, so a later file overrides an earlier one.
+ * (measured), so `$$` is the group id and the inner `bash -c` joins it. The
+ * id is written to a temp file and renamed, so a reader never sees it half
+ * written. A `.killed` marker means a kill came before the start: exit 143
+ * without running. `envFiles` are sourced in order (a later file overrides an
+ * earlier one), then the command's own `.env` file is deleted.
  */
 export function wrapCommand(
   command: string,
@@ -120,18 +129,19 @@ export function wrapCommand(
   envFiles: Array<string>,
 ): string {
   const sourceStep = envFiles.map((file) => `. ${file} && `).join('')
-  return `mkdir -p ${PGID_DIR} && echo $$ > ${pgidFile} && ${sourceStep}cd ${q(cwd)} && bash -c ${q(command)}; tsai_status=$?; rm -f ${pgidFile} ${pgidFile}.env; exit $tsai_status`
+  return `tsai_status=1; mkdir -p ${PGID_DIR} && echo $$ > ${pgidFile}.tmp && mv -f ${pgidFile}.tmp ${pgidFile} && if [ -e ${pgidFile}.killed ]; then tsai_status=143; else ${sourceStep}rm -f ${pgidFile}.env && cd ${q(cwd)} && bash -c ${q(command)}; tsai_status=$?; fi; rm -f ${pgidFile} ${pgidFile}.env ${pgidFile}.killed; exit $tsai_status`
 }
 
 /**
  * Signal the process group recorded in `pgidFile`: `TERM`, then `KILL` if it
- * is still alive after 2 s. Waits up to 2 s for the file, so a kill that races
- * the wrapper's start still lands. A missing file means the command is gone.
- * Also removes the command's env file, which a killed wrapper leaves behind.
+ * is still alive after 2 s. It first leaves a `.killed` marker, so a wrapper
+ * that starts later exits without running, then waits up to 2 s for the file
+ * so a kill that races the start still lands. Cleans up the files a killed
+ * wrapper leaves behind.
  */
 export function killCommand(pgidFile: string): string {
-  const cleanup = `rm -f ${pgidFile} ${pgidFile}.env`
-  return `for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || { ${cleanup}; exit 0; }; kill -TERM -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; ${cleanup}; true`
+  const cleanup = `rm -f ${pgidFile} ${pgidFile}.env ${pgidFile}.killed`
+  return `mkdir -p ${PGID_DIR} && touch ${pgidFile}.killed; for i in $(seq 20); do [ -f ${pgidFile} ] && break; sleep 0.1; done; g=$(cat ${pgidFile} 2>/dev/null) || exit 0; kill -TERM -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; for i in $(seq 20); do sleep 0.1; kill -0 -- -$g 2>/dev/null || { ${cleanup}; exit 0; }; done; kill -KILL -- -$g 2>/dev/null; ${cleanup}; true`
 }
 
 const LSTAT_MISSING = '__TANSTACK_LSTAT_MISSING__'
@@ -271,8 +281,15 @@ export class RenderHandle implements SandboxHandle {
   private readonly workdir: string
   private readonly snapshotKind: SandboxSnapshotKind
   private readonly envVars: Record<string, string> = {}
-  /** The uploaded copy of `envVars`, once `env.set` has written one. */
-  private envFile: string | undefined
+  /** Bumped by each `env.set`; 0 means this handle has no overlay. */
+  private envVersion = 0
+  /** The version on disk at `ENV_FILE`; -1 after a snapshot removed it. */
+  private envWritten = 0
+  /**
+   * Overlay writes, snapshots and command starts run one at a time through
+   * this queue, so no command starts while a snapshot has the overlay removed.
+   */
+  private envQueue: Promise<unknown> = Promise.resolve()
 
   constructor(deps: RenderHandleDeps) {
     this.client = deps.client
@@ -366,10 +383,11 @@ export class RenderHandle implements SandboxHandle {
       // later exec/spawn sources. TanStack re-applies workspace secrets
       // through this on resume and restore.
       set: async (vars) => {
+        // Check names first, so a rejected call leaves the overlay unchanged.
+        envFileContent(vars)
         Object.assign(this.envVars, vars)
-        const file = this.envFile ?? `${PGID_DIR}/env-${randomUUID()}`
-        await this.client.upload(this.id, file, envFileContent(this.envVars))
-        this.envFile = file
+        this.envVersion++
+        await this.queueEnv(() => this.writeEnv())
       },
     }
   }
@@ -450,6 +468,21 @@ export class RenderHandle implements SandboxHandle {
     return parseLstatOutput(r.stdout)
   }
 
+  /** Run `op` after every queued overlay write, snapshot and command start. */
+  private queueEnv<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.envQueue.then(op, op)
+    this.envQueue = next.catch(noop)
+    return next
+  }
+
+  /** Upload the overlay if the copy on disk is missing or older. Run it queued. */
+  private async writeEnv(): Promise<void> {
+    const version = this.envVersion
+    if (version === 0 || this.envWritten === version) return
+    await this.client.upload(this.id, ENV_FILE, envFileContent(this.envVars))
+    this.envWritten = version
+  }
+
   /** Run a short command with no wrapper and no abort; used to deliver kills. */
   private async raw(command: string): Promise<void> {
     const events = await this.client.exec(this.id, command)
@@ -467,6 +500,11 @@ export class RenderHandle implements SandboxHandle {
     onOutput: (stream: 'stdout' | 'stderr', data: string) => void,
   ): RunningCommand {
     const pgidFile = `${PGID_DIR}/${randomUUID()}`
+    // Per-call env goes in its own file, sourced after the overlay so it wins.
+    const callEnv =
+      opts?.env && Object.keys(opts.env).length > 0
+        ? envFileContent(opts.env)
+        : undefined
     const stream = new AbortController()
     let settled = false
     let killed = false
@@ -484,35 +522,31 @@ export class RenderHandle implements SandboxHandle {
       }
     }
 
-    const envFiles = this.envFile ? [this.envFile] : []
     const exit = (async (): Promise<number> => {
-      // Per-call env goes in its own file, sourced after the overlay so it wins.
-      if (opts?.env && Object.keys(opts.env).length > 0) {
-        await this.client.upload(
-          this.id,
-          `${pgidFile}.env`,
-          envFileContent(opts.env),
-        )
-        envFiles.push(`${pgidFile}.env`)
-        // A kill during the upload found no process group: never start the
-        // command, and remove the env file the kill could not see yet.
-        if (killed) {
-          await this.raw(`rm -f ${pgidFile}.env`).catch(() => undefined)
-          return 128 + 15
+      // Starting is queued: it waits out overlay writes and snapshots, and
+      // rewrites the overlay if a snapshot left it missing.
+      const events = await this.queueEnv(async () => {
+        await this.writeEnv()
+        const envFiles = this.envVersion > 0 ? [ENV_FILE] : []
+        if (callEnv !== undefined) {
+          await this.client.upload(this.id, `${pgidFile}.env`, callEnv)
+          envFiles.push(`${pgidFile}.env`)
         }
-      }
-      const wrapped = wrapCommand(
-        command,
-        pgidFile,
-        opts?.cwd ? this.abs(opts.cwd) : this.workdir,
-        envFiles,
-      )
-      const events = await this.client.exec(
-        this.id,
-        wrapped,
-        undefined,
-        stream.signal,
-      )
+        // Killed before the start: never start it, and remove what the kill
+        // could not see yet.
+        if (killed) {
+          await this.raw(`rm -f ${pgidFile}.env ${pgidFile}.killed`).catch(noop)
+          return undefined
+        }
+        const wrapped = wrapCommand(
+          command,
+          pgidFile,
+          opts?.cwd ? this.abs(opts.cwd) : this.workdir,
+          envFiles,
+        )
+        return this.client.exec(this.id, wrapped, undefined, stream.signal)
+      })
+      if (events === undefined) return 128 + 15
       for await (const event of events) {
         if (event.type === 'output') onOutput(event.stream, event.data)
         else return event.exit_code
@@ -617,13 +651,14 @@ export class RenderHandle implements SandboxHandle {
     }
   }
 
-  snapshot = async (label?: string): Promise<SnapshotRef> => {
-    // Keep secrets out of the image: the env file is removed for the capture
-    // and written back after. A restore gets current secrets through `env.set`.
-    const envFile = this.envFile
-    if (envFile)
-      await this.check(`rm -f -- ${q(envFile)}`, 'hide env', undefined)
-    try {
+  snapshot = (label?: string): Promise<SnapshotRef> =>
+    this.queueEnv(async () => {
+      // Keep secrets out of the image: remove the overlay (this handle's or an
+      // earlier one's) for the capture; queued commands wait meanwhile. The
+      // removal is an exec, so it also wakes a suspended sandbox, and Render
+      // only snapshots a running one.
+      await this.raw(`rm -f -- ${ENV_FILE}`)
+      this.envWritten = -1
       const snap = await this.client.snapshots.create({
         sandboxId: this.id,
         kind: this.snapshotKind,
@@ -634,13 +669,11 @@ export class RenderHandle implements SandboxHandle {
         ),
         wait: true,
       })
+      // Write it back now; if that fails, the next command retries it. The
+      // snapshot exists either way, so its ref must not be lost.
+      await this.writeEnv().catch(noop)
       return { id: snap.id, ...(label !== undefined ? { label } : {}) }
-    } finally {
-      if (envFile) {
-        await this.client.upload(this.id, envFile, envFileContent(this.envVars))
-      }
-    }
-  }
+    })
 
   async destroy(): Promise<void> {
     try {

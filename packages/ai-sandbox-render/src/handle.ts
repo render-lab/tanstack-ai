@@ -452,9 +452,11 @@ export class RenderHandle implements SandboxHandle {
     const pgidFile = `${PGID_DIR}/${randomUUID()}`
     const stream = new AbortController()
     let settled = false
+    let killed = false
 
     const kill = async (): Promise<void> => {
       if (settled) return
+      killed = true
       await this.raw(killCommand(pgidFile)).catch(() => undefined)
       await settleWithin(exit, KILL_SETTLE_MS)
       if (!settled) {
@@ -475,6 +477,12 @@ export class RenderHandle implements SandboxHandle {
           envFileContent(opts.env),
         )
         envFiles.push(`${pgidFile}.env`)
+        // A kill during the upload found no process group: never start the
+        // command, and remove the env file the kill could not see yet.
+        if (killed) {
+          await this.raw(`rm -f ${pgidFile}.env`).catch(() => undefined)
+          return 128 + 15
+        }
       }
       const wrapped = wrapCommand(
         command,

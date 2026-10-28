@@ -103,6 +103,26 @@ describe('process', () => {
     expect(await lines(ticks)).toBe(after)
   })
 
+  it('a kill during the env upload never starts the command', async () => {
+    const marker = join(dir, 'started')
+    const upload = fake.client.upload.getMockImplementation()!
+    fake.client.upload.mockImplementationOnce(async (...args: Array<any>) => {
+      // Longer than killCommand's 2 s wait for the process-group file.
+      await sleep(2500)
+      return upload(...args)
+    })
+    const proc = await handle.process.spawn(`touch ${marker}`, {
+      env: { TOKEN: 't' },
+    })
+    await proc.kill()
+    expect(await proc.wait()).toBe(143)
+    await expect(stat(marker)).rejects.toThrow()
+    const sent: Array<string> = fake.client.exec.mock.calls.map(
+      (call: Array<unknown>) => String(call[1]),
+    )
+    expect(sent.some((c) => c.includes(marker))).toBe(false)
+  }, 10_000)
+
   it('streams spawn output and has no stdin', async () => {
     const proc = await handle.process.spawn('echo out; echo err >&2')
     const out: Array<string> = []

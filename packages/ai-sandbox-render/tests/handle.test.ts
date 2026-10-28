@@ -168,6 +168,19 @@ describe('fs', () => {
     await expect(handle.fs.read('/tmp/dir/')).rejects.toThrow(/is a directory/)
   })
 
+  it('an aborted exists rejects instead of returning false', async () => {
+    const exec = fake.client.exec.getMockImplementation()!
+    fake.client.exec.mockImplementationOnce(
+      (id: string, command: string, ...rest: Array<any>) =>
+        exec(id, `sleep 1; ${command}`, ...rest),
+    )
+    const controller = new AbortController()
+    const check = handle.fs.exists('nope', { signal: controller.signal })
+    await sleep(200)
+    controller.abort(new Error('cancelled'))
+    await expect(check).rejects.toThrow('cancelled')
+  })
+
   it('refuses to remove the root', async () => {
     await expect(handle.fs.remove('/')).rejects.toThrow(/refusing/)
   })

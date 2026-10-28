@@ -398,11 +398,18 @@ export class RenderHandle implements SandboxHandle {
    * Run an fs helper from `/`. Helpers take absolute paths, and the workdir
    * may not exist yet (creating it is the first helper `create` runs).
    */
-  private sh(
+  private async sh(
     command: string,
     signal: AbortSignal | undefined,
   ): Promise<ExecResult> {
-    return this.exec(command, { cwd: '/', ...(signal ? { signal } : {}) })
+    const r = await this.exec(command, {
+      cwd: '/',
+      ...(signal ? { signal } : {}),
+    })
+    // An aborted exec resolves with the killed exit code; fs calls must reject,
+    // or `exists` reads a cancel as "missing".
+    signal?.throwIfAborted()
+    return r
   }
 
   /** Run an fs helper and throw on a non-zero exit. */

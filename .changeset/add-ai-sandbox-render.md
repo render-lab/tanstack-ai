@@ -7,7 +7,7 @@ Add `@tanstack/ai-sandbox-render`, a sandbox provider backed by
 It implements the `SandboxProvider` / `SandboxHandle` contract: native file
 transfer for reads and writes, shell-backed `list`, `mkdir`, `remove`,
 `rename`, `exists` and a non-following `lstat`, commands with separate stdout
-and stderr, background processes, a handle-local env overlay, filesystem or
+and stderr, background processes, a shared env overlay, filesystem or
 runtime snapshots, resume by id, and an enforced `deny-all` network policy.
 
 `killableProcesses` is `true` and measured against a real sandbox: every

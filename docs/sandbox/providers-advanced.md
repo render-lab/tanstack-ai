@@ -378,15 +378,17 @@ const render = renderSandbox({
 ```
 
 - **Isolation:** a managed [Render](https://render.com/docs/sandboxes) sandbox. It boots from the base image (Debian 12, `root` user), a custom image (`buildName`), or a named snapshot (`snapshotName`).
-- **Auth:** the SDK reads `RENDER_API_KEY` and `RENDER_WORKSPACE_ID`. Pass `token` and `ownerId` to set them in code. Harness credentials are [workspace secrets](./provisioning). The provider uploads them to a file that only `root` can read, and each command loads that file. No value goes into a command string.
+- **Auth:** the SDK reads `RENDER_API_KEY` and `RENDER_WORKSPACE_ID`. Pass `token` and `ownerId` to set them in code. Harness credentials are [workspace secrets](./provisioning). The provider uploads them to a shared file that only `root` can read. Reconnecting with fresh secrets replaces that file and removes older overlays. No value goes into a command string.
 - **Lifetime:** Render suspends an idle sandbox after `idleTimeoutSeconds` (default 900) and keeps its disk, so `durableFilesystem` is `true`. The next command or file call resumes it. After `timeoutSeconds` (default 86400), Render terminates it.
 - **Network:** `policy.capabilities.network: 'deny'` sends `deny-all`, and Render enforces it. Otherwise the provider sends `networkPolicy`, or allows all egress.
 - **Not available:** inbound ports, stdin for a spawned process, and fork. `ports.connect` throws. Harnesses that need a port or stdin, such as OpenCode and ACP harnesses, do not run on Render.
 
 Snapshots and resume on Render:
 
+Take snapshots while commands are stopped. When multiple orchestrator processes share a sandbox, use your lifecycle lock to serialize snapshots and secret updates.
+
 - `snapshot(label)` captures a `filesystem` snapshot named `tsai-<label>`, and waits until it is available. Set `snapshotKind: 'runtime'` to keep memory and processes too. A runtime snapshot restores only onto the same `plan`.
-- Render restores a snapshot only inside its sandbox group, so keep the same `sandboxGroupId` between capture and restore. `restoreSnapshot()` applies env and the network policy again, because a snapshot does not keep them.
+- Render restores a snapshot only inside its sandbox group, so keep the same `sandboxGroupId` between capture and restore. `restoreSnapshot()` applies env and the network policy again. Filesystem snapshots exclude the provider env overlay. Runtime snapshots retain the environment of existing processes.
 - The contract has no delete hook. Delete `tsai-*` snapshots that you do not use with `sandboxes.snapshots.delete()` from `@renderinc/sdk`.
 - Resume by id reads the sandbox status. A missing, `errored`, or `terminated` sandbox resumes as `null`. Auth and server errors are thrown again.
 - Render makes its own `sbx-` ids, so `create` ignores `input.id`. Keep the returned id in your instance store.
@@ -394,8 +396,8 @@ Snapshots and resume on Render:
 Processes on Render:
 
 - Each command runs through `bash -c` in `/workspace`. Set `workdir` to change it. stdout and stderr stay separate, and `spawn()` reports `pid: -1`.
-- Each command records its process group in `/tmp/tsai`. `kill()` and an aborted `exec` or `spawn` send `TERM` to that group from a second command, then `KILL` after 2 s.
-- A kill finishes on the confirmed remote exit. An aborted `exec` resolves with the exit code of the signal.
+- Each command has its own process group, recorded in `/tmp/tsai`. `kill()` and abort send `TERM`, then `KILL` after 2 s. A cancellation marker prevents delayed commands from starting.
+- A supervising shell stops remaining children before it reports exit. A kill finishes on the confirmed remote exit. An aborted `exec` resolves with the exit code of the signal.
 - If the host disconnects, the command keeps running in the sandbox. The [run journal](./journal) owns run identity, so a new host reads the output from the journal.
 - `read`, `readBytes`, and `write` use native file transfer. Each other file call is one command, about 0.6 s. Render allows 1,000 commands per minute for each user.
 

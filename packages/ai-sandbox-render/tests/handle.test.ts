@@ -4,6 +4,7 @@
  * child, not just this host's view of the stream.
  */
 import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -193,6 +194,73 @@ describe('process', () => {
     expect(sent.some((c) => c.includes(marker))).toBe(false)
   }, 10_000)
 
+  it.each(['kill', 'abort'] as const)(
+    '%s prevents a delayed exec request from starting',
+    async (cancel) => {
+      const exec = fake.client.exec.getMockImplementation()!
+      fake.client.exec.mockImplementationOnce(async (...args: Array<any>) => {
+        await sleep(2500)
+        return exec(...args)
+      })
+      const controller = new AbortController()
+      const proc = await handle.process.spawn('touch delayed-marker', {
+        signal: controller.signal,
+      })
+      if (cancel === 'kill') await proc.kill()
+      else controller.abort()
+      expect(await proc.wait()).not.toBe(0)
+      await expect(stat(join(dir, 'delayed-marker'))).rejects.toThrow()
+    },
+    10_000,
+  )
+
+  it('stops a surviving child when its foreground shell exits', async () => {
+    // A bounded writer and explicit cleanup also keep the failing regression safe.
+    const proc = await handle.process.spawn(
+      '(trap "" TERM; for i in $(seq 600); do echo t >> orphan-ticks; sleep 0.05; done) & echo $! > orphan-pid; exit 0',
+    )
+    try {
+      for (let i = 0; i < 100; i++) {
+        if (await stat(join(dir, 'orphan-pid')).catch(() => undefined)) break
+        await sleep(20)
+      }
+      await stat(join(dir, 'orphan-pid'))
+      await sleep(200)
+      await proc.kill()
+      await proc.wait()
+      const after = await lines(join(dir, 'orphan-ticks'))
+      await sleep(300)
+      expect(await lines(join(dir, 'orphan-ticks'))).toBe(after)
+    } finally {
+      const pid = Number(await readFile(join(dir, 'orphan-pid'), 'utf8'))
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        /* Already stopped. */
+      }
+    }
+  }, 20_000)
+
+  it('kills a group when the provider exec shell is sh', async () => {
+    const shellClient = fakeClient(undefined, 'sh')
+    const shellHandle = new RenderHandle({
+      client: shellClient.sdk,
+      id: 'sbx-sh',
+      workdir: dir,
+      snapshotKind: 'filesystem',
+    })
+    const ticks = join(dir, 'sh-ticks')
+    const proc = await shellHandle.process.spawn(
+      `(for i in $(seq 100); do echo t >> ${ticks}; sleep 0.05; done) & wait`,
+    )
+    await sleep(200)
+    await proc.kill()
+    expect(await proc.wait()).not.toBe(0)
+    const after = await lines(ticks)
+    await sleep(300)
+    expect(await lines(ticks)).toBe(after)
+  })
+
   it('streams spawn output and has no stdin', async () => {
     const proc = await handle.process.spawn('echo out; echo err >&2')
     const out: Array<string> = []
@@ -321,20 +389,145 @@ describe('capabilities', () => {
     expect((await handle.process.exec('echo $SECRET')).stdout).toBe('sk-1\n')
   })
 
-  it('a command started during the capture waits for it and keeps its env', async () => {
-    await handle.env.set({ SECRET: 'sk-1' })
-    let capturing!: () => void
-    const started = new Promise<void>((resolve) => (capturing = resolve))
-    fake.client.snapshots.create.mockImplementationOnce(async () => {
-      capturing()
-      await sleep(300)
-      return { id: 'snp-1' }
+  it.each([false, true])(
+    'a command started during capture waits (resumed handle: %s)',
+    async (useResumed) => {
+      await handle.env.set({ SECRET: 'sk-1' })
+      const executing = useResumed
+        ? new RenderHandle({
+            client: fake.sdk,
+            id: 'sbx-test',
+            workdir: dir,
+            snapshotKind: 'filesystem',
+          })
+        : handle
+      if (useResumed) await executing.env.set({ SECRET: 'sk-1' })
+      let capturing!: () => void
+      const started = new Promise<void>((resolve) => (capturing = resolve))
+      fake.client.snapshots.create.mockImplementationOnce(async () => {
+        capturing()
+        await sleep(300)
+        return { id: 'snp-1' }
+      })
+      const snap = handle.snapshot()
+      await started
+      const r = await executing.process.exec('echo $SECRET')
+      await snap
+      expect(r).toMatchObject({ stdout: 'sk-1\n', exitCode: 0 })
+    },
+  )
+
+  it('rotation replaces the overlay across handles and excludes old files from snapshots', async () => {
+    await handle.env.set({ SECRET: 'old-canary' })
+    const oldFile = String(fake.client.upload.mock.calls[0][1])
+    // An overlay from the previous provider version can exist on a resumed VM.
+    const legacyFile = `/tmp/tsai/env-${randomUUID()}`
+    await fake.sdk.upload(
+      'sbx-test',
+      legacyFile,
+      'export SECRET=legacy-canary\n',
+    )
+    const resumed = new RenderHandle({
+      client: fake.sdk,
+      id: 'sbx-test',
+      workdir: dir,
+      snapshotKind: 'filesystem',
     })
-    const snap = handle.snapshot()
-    await started
-    const r = await handle.process.exec('echo $SECRET')
-    await snap
-    expect(r).toMatchObject({ stdout: 'sk-1\n', exitCode: 0 })
+    try {
+      await resumed.env.set({ SECRET: 'new-canary' })
+      expect(await readFile(oldFile, 'utf8').catch(() => '')).not.toContain(
+        'old-canary',
+      )
+      await expect(stat(legacyFile)).rejects.toThrow()
+      await fake.sdk.upload(
+        'sbx-test',
+        legacyFile,
+        'export SECRET=legacy-canary\n',
+      )
+      fake.client.snapshots.create.mockImplementationOnce(async () => {
+        await expect(stat(oldFile)).rejects.toThrow()
+        await expect(stat(legacyFile)).rejects.toThrow()
+        return { id: 'snp-rotated' }
+      })
+      // An older handle must restore the rotated file, not its cached old values.
+      await handle.snapshot()
+      expect((await resumed.process.exec('echo "$SECRET"')).stdout).toBe(
+        'new-canary\n',
+      )
+    } finally {
+      await rm(legacyFile, { force: true })
+    }
+  })
+
+  it('a fresh handle preserves the shared overlay when taking a snapshot', async () => {
+    await handle.env.set({ SECRET: 'current-canary' })
+    const resumed = new RenderHandle({
+      client: fake.sdk,
+      id: 'sbx-test',
+      workdir: dir,
+      snapshotKind: 'filesystem',
+    })
+    await resumed.snapshot()
+    expect((await handle.process.exec('echo "$SECRET"')).stdout).toBe(
+      'current-canary\n',
+    )
+  })
+
+  it('serializes secret rotation with capture across handles', async () => {
+    await handle.env.set({ SECRET: 'old-canary' })
+    const envFile = String(fake.client.upload.mock.calls[0][1])
+    const resumed = new RenderHandle({
+      client: fake.sdk,
+      id: 'sbx-test',
+      workdir: dir,
+      snapshotKind: 'filesystem',
+    })
+    let rotation: Promise<void> | undefined
+    let presentDuringCapture = true
+    fake.client.snapshots.create.mockImplementationOnce(async () => {
+      rotation = resumed.env.set({ SECRET: 'new-canary' })
+      // Allow an uncoordinated upload to complete while capture is pending.
+      await sleep(100)
+      presentDuringCapture = await stat(envFile).then(
+        () => true,
+        () => false,
+      )
+      return { id: 'snp-concurrent' }
+    })
+    await handle.snapshot()
+    await rotation
+    expect(presentDuringCapture).toBe(false)
+    expect((await handle.process.exec('echo "$SECRET"')).stdout).toBe(
+      'new-canary\n',
+    )
+  })
+
+  it('retries the rotated shared overlay after snapshot write-back fails', async () => {
+    await handle.env.set({ SECRET: 'old-canary' })
+    const resumed = new RenderHandle({
+      client: fake.sdk,
+      id: 'sbx-test',
+      workdir: dir,
+      snapshotKind: 'filesystem',
+    })
+    await resumed.env.set({ SECRET: 'new-canary' })
+    fake.client.upload.mockRejectedValueOnce(new Error('transient 502'))
+    expect(await handle.snapshot('s')).toEqual({ id: 'snp-1', label: 's' })
+    expect((await handle.process.exec('echo "$SECRET"')).stdout).toBe(
+      'new-canary\n',
+    )
+  })
+
+  it('refuses to capture when removing the secret overlay fails', async () => {
+    await handle.env.set({ SECRET: 'canary' })
+    fake.client.exec.mockImplementationOnce(async function* () {
+      yield { type: 'exit', exit_code: 1 }
+    })
+    await expect(handle.snapshot()).rejects.toThrow('control command failed')
+    expect(fake.client.snapshots.create).not.toHaveBeenCalled()
+    expect((await handle.process.exec('echo "$SECRET"')).stdout).toBe(
+      'canary\n',
+    )
   })
 
   it('keeps the snapshot name within 64 characters and the full label in the ref', async () => {

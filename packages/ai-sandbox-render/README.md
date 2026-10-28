@@ -96,19 +96,19 @@ passes. Keep the returned id in your instance store.
 
 ## Capabilities
 
-| Capability            | Supported | Why                                                                                                                                                                                     |
-| --------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fs`                  | yes       | `read`, `readBytes`, and `write` use native file transfer. Other calls run one shell command each. `lstat` is a GNU `stat` probe that does not follow symlinks.                         |
-| `exec`                | yes       | Separate `stdout` and `stderr`. An aborted `exec` resolves with the exit code of the signal.                                                                                            |
-| `env`                 | yes       | Create-time env plus a handle-local overlay, uploaded as a root-only file that every command loads. No value goes into a command string.                                                |
-| `backgroundProcesses` | yes       | `spawn()` streams output. `pid` is `-1`. A command keeps running if the host disconnects.                                                                                               |
-| `killableProcesses`   | yes       | **Measured.** Each command records its process group. `kill()` sends `TERM` to the group from a second command, then `KILL` after 2 s. The shared journal conformance kill case passes. |
-| `snapshots`           | yes       | `filesystem` by default, `runtime` with `snapshotKind`. Named `tsai-<label>`.                                                                                                           |
-| `networkPolicy`       | yes       | `deny-all`, `allow-all`, and `allow-list` are enforced by Render.                                                                                                                       |
-| `durableFilesystem`   | yes       | An idle sandbox suspends with its disk and resumes on the next command or file call.                                                                                                    |
-| `ports`               | no        | Render sandboxes have no inbound ports.                                                                                                                                                 |
-| `writableStdin`       | no        | Render exec has no stdin. Harnesses get their prompt from a file.                                                                                                                       |
-| `fork`                | no        | Render has no native fork.                                                                                                                                                              |
+| Capability            | Supported | Why                                                                                                                                                               |
+| --------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fs`                  | yes       | `read`, `readBytes`, and `write` use native file transfer. Other calls run one shell command each. `lstat` is a GNU `stat` probe that does not follow symlinks.   |
+| `exec`                | yes       | Separate `stdout` and `stderr`. An aborted `exec` resolves with the exit code of the signal.                                                                      |
+| `env`                 | yes       | Create-time env plus a shared root-only overlay replaced when secrets are reapplied on reconnect. No value goes into a command string.                            |
+| `backgroundProcesses` | yes       | `spawn()` streams output. `pid` is `-1`. A command keeps running if the host disconnects.                                                                         |
+| `killableProcesses`   | yes       | A supervisor owns each command group and stops remaining children. Cancellation sends `TERM`, then `KILL` after 2 s, and prevents delayed commands from starting. |
+| `snapshots`           | yes       | `filesystem` by default, `runtime` with `snapshotKind`. Named `tsai-<label>`.                                                                                     |
+| `networkPolicy`       | yes       | `deny-all`, `allow-all`, and `allow-list` are enforced by Render.                                                                                                 |
+| `durableFilesystem`   | yes       | An idle sandbox suspends with its disk and resumes on the next command or file call.                                                                              |
+| `ports`               | no        | Render sandboxes have no inbound ports.                                                                                                                           |
+| `writableStdin`       | no        | Render exec has no stdin. Harnesses get their prompt from a file.                                                                                                 |
+| `fork`                | no        | Render has no native fork.                                                                                                                                        |
 
 ## Known limits
 

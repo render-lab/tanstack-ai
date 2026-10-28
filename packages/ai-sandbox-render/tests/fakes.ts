@@ -9,13 +9,15 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { constants } from 'node:os'
 import { dirname } from 'node:path'
 import { vi } from 'vitest'
+import { ClientError } from '@renderinc/sdk'
 import type { SandboxExecEvent, SandboxesClient } from '@renderinc/sdk'
 
 async function* localExec(
   command: string,
   signal?: AbortSignal,
+  shell = 'bash',
 ): AsyncGenerator<SandboxExecEvent> {
-  const child = spawn('bash', ['-c', command], {
+  const child = spawn(shell, ['-c', command], {
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -52,7 +54,10 @@ async function* localExec(
   }
 }
 
-export function fakeClient(files = new Map<string, Uint8Array>()): {
+export function fakeClient(
+  files = new Map<string, Uint8Array>(),
+  shell = 'bash',
+): {
   /** The fake's `vi.fn` mocks, for driving and asserting. */
   client: Record<string, any>
   sdk: SandboxesClient
@@ -61,7 +66,7 @@ export function fakeClient(files = new Map<string, Uint8Array>()): {
   const client = {
     exec: vi.fn(
       (_id: string, command: string, _owner?: string, signal?: AbortSignal) =>
-        Promise.resolve(localExec(command, signal)),
+        Promise.resolve(localExec(command, signal, shell)),
     ),
     // Uploads land on the local disk too, so the local bash can source env files.
     upload: vi.fn(
@@ -73,7 +78,7 @@ export function fakeClient(files = new Map<string, Uint8Array>()): {
     download: vi.fn(async (_id: string, path: string) => {
       const data =
         files.get(path) ?? (await readFile(path).catch(() => undefined))
-      if (data === undefined) throw new Error('not found')
+      if (data === undefined) throw new ClientError('not found', 404)
       return Promise.resolve({
         data: Buffer.from(data),
         size: data.byteLength,

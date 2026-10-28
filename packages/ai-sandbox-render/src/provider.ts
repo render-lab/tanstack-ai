@@ -1,4 +1,9 @@
-import { ClientError, Render, SandboxCreateWaitError } from '@renderinc/sdk'
+import {
+  ClientError,
+  Render,
+  SandboxCreateWaitError,
+  SandboxNotRunningError,
+} from '@renderinc/sdk'
 import { DEFAULT_WORKDIR, RENDER_CAPS, RenderHandle } from './handle'
 import type {
   SandboxCreateInput as RenderCreateInput,
@@ -201,9 +206,20 @@ class RenderProvider implements SandboxProvider {
     }
     if (ENDED.has(status)) return null
     if (status === 'creating' || status === 'resuming') {
-      await this.client.waitUntilRunning(input.id, {
-        ...(input.signal ? { signal: input.signal } : {}),
-      })
+      try {
+        await this.client.waitUntilRunning(input.id, {
+          ...(input.signal ? { signal: input.signal } : {}),
+        })
+      } catch (error) {
+        // It can end while we wait; the SDK throws instead of returning it.
+        if (
+          error instanceof SandboxNotRunningError &&
+          ENDED.has(error.sandboxStatus)
+        ) {
+          return null
+        }
+        throw error
+      }
     }
     // A suspended sandbox resumes on the next exec or file call.
     return this.handle(input.id)

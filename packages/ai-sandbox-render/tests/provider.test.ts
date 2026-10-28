@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ClientError,
   SandboxCreateWaitError,
+  SandboxNotRunningError,
   ServerError,
 } from '@renderinc/sdk'
 import { renderSandbox } from '../src/index'
@@ -124,6 +125,18 @@ describe('resume', () => {
     await provider.resume({ id: 'sbx-1' })
     expect(client.waitUntilRunning).toHaveBeenCalled()
   })
+
+  it.each(['terminated', 'errored'])(
+    'returns null when it becomes %s during the wait',
+    async (status) => {
+      const { client, provider } = setup()
+      client.get.mockResolvedValue({ status: 'resuming' })
+      client.waitUntilRunning.mockRejectedValue(
+        new SandboxNotRunningError('ended', 'sbx-1', status),
+      )
+      expect(await provider.resume({ id: 'sbx-1' })).toBeNull()
+    },
+  )
 
   it.each(['terminated', 'errored'])('returns null for %s', async (status) => {
     const { client, provider } = setup()

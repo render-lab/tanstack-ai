@@ -193,6 +193,23 @@ describe('capabilities', () => {
     })
   })
 
+  it('removes the env file during the capture and restores it after', async () => {
+    await handle.env.set({ SECRET: 'sk-1' })
+    const envFile = String(fake.client.upload.mock.calls[0][1])
+    let presentAtCapture = true
+    fake.client.snapshots.create.mockImplementationOnce(async () => {
+      presentAtCapture = await stat(envFile).then(
+        () => true,
+        () => false,
+      )
+      return { id: 'snp-1' }
+    })
+    await handle.snapshot('after-setup')
+    expect(presentAtCapture).toBe(false)
+    expect(await readFile(envFile, 'utf8')).toContain('sk-1')
+    await rm(envFile, { force: true })
+  })
+
   it('keeps the snapshot name within 64 characters and the full label in the ref', async () => {
     const label = 'x'.repeat(100)
     expect((await handle.snapshot(label)).label).toBe(label)

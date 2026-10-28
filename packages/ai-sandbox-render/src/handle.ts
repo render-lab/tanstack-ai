@@ -599,14 +599,28 @@ export class RenderHandle implements SandboxHandle {
   }
 
   snapshot = async (label?: string): Promise<SnapshotRef> => {
-    const snap = await this.client.snapshots.create({
-      sandboxId: this.id,
-      kind: this.snapshotKind,
-      // Render caps names at 64 characters; the full label stays in the ref.
-      name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`.slice(0, SNAPSHOT_NAME_MAX),
-      wait: true,
-    })
-    return { id: snap.id, ...(label !== undefined ? { label } : {}) }
+    // Keep secrets out of the image: the env file is removed for the capture
+    // and written back after. A restore gets current secrets through `env.set`.
+    const envFile = this.envFile
+    if (envFile)
+      await this.check(`rm -f -- ${q(envFile)}`, 'hide env', undefined)
+    try {
+      const snap = await this.client.snapshots.create({
+        sandboxId: this.id,
+        kind: this.snapshotKind,
+        // Render caps names at 64 characters; the full label stays in the ref.
+        name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`.slice(
+          0,
+          SNAPSHOT_NAME_MAX,
+        ),
+        wait: true,
+      })
+      return { id: snap.id, ...(label !== undefined ? { label } : {}) }
+    } finally {
+      if (envFile) {
+        await this.client.upload(this.id, envFile, envFileContent(this.envVars))
+      }
+    }
   }
 
   async destroy(): Promise<void> {

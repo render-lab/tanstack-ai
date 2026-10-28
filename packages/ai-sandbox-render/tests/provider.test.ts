@@ -88,6 +88,15 @@ describe('create', () => {
       }),
     ).toThrow(/either/)
   })
+
+  it.each([{ token: 'rnd_x' }, { ownerId: 'tea-x' as const }])(
+    'rejects %o alongside a pre-built client',
+    (auth) => {
+      expect(() =>
+        renderSandbox({ client: fakeClient().sdk, ...auth }),
+      ).toThrow(/on your client/)
+    },
+  )
 })
 
 describe('restoreSnapshot', () => {

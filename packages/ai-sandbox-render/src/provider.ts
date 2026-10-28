@@ -28,7 +28,7 @@ export interface RenderSandboxConfig {
   token?: string
   /** Workspace id (`tea-…`). Omit to let the SDK read `RENDER_WORKSPACE_ID`. */
   ownerId?: `tea-${string}`
-  /** Pre-built SDK sandboxes client (tests, custom base URL). Overrides `token`. */
+  /** Pre-built SDK sandboxes client (tests, custom base URL). Set `token` and `ownerId` on it; passing them here too throws. */
   client?: SandboxesClient
   /**
    * Sandbox group to create in. Defaults to the workspace's default group.
@@ -89,6 +89,15 @@ class RenderProvider implements SandboxProvider {
   constructor(private readonly config: RenderSandboxConfig) {
     if (config.buildName !== undefined && config.snapshotName !== undefined) {
       throw new Error('render: pass either buildName or snapshotName, not both')
+    }
+    // A pre-built client carries its own auth; these would be silently ignored.
+    if (
+      config.client !== undefined &&
+      (config.token !== undefined || config.ownerId !== undefined)
+    ) {
+      throw new Error(
+        'render: set token and ownerId on your client, not alongside it',
+      )
     }
     this.client =
       config.client ??

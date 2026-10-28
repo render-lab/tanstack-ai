@@ -76,20 +76,20 @@ try {
 
 ## Configuration
 
-| Option               | Default               | Notes                                                                                                 |
-| -------------------- | --------------------- | ----------------------------------------------------------------------------------------------------- |
-| `token`              | `RENDER_API_KEY`      | Render API key.                                                                                       |
-| `ownerId`            | `RENDER_WORKSPACE_ID` | Workspace id (`tea-...`).                                                                             |
-| `client`             | none                  | A pre-built `SandboxesClient` from `@renderinc/sdk`. Overrides `token`.                               |
-| `sandboxGroupId`     | workspace default     | Snapshots restore only inside the group they were captured in.                                        |
-| `plan`               | `1c-2g`               | `1c-2g`, `2c-4g`, `4c-8g`, `8c-16g`, or a newer plan.                                                 |
-| `timeoutSeconds`     | `86400`               | Maximum continuous runtime. Render terminates the sandbox after it.                                   |
-| `idleTimeoutSeconds` | `900`                 | Render suspends an idle sandbox and keeps its disk. `0` turns off idle suspension.                    |
-| `networkPolicy`      | `allow-all`           | Egress when the policy allows network, for example an `allow-list`. A `deny` policy sends `deny-all`. |
-| `buildName`          | none                  | Boot every new sandbox from this Render sandbox build (a custom image).                               |
-| `snapshotName`       | none                  | Boot every new sandbox from this named snapshot.                                                      |
-| `snapshotKind`       | `filesystem`          | What `snapshot()` captures. `runtime` also keeps memory and processes, and needs the same `plan`.     |
-| `workdir`            | `/workspace`          | Where the `/workspace` virtual root maps. Created at boot.                                            |
+| Option               | Default               | Notes                                                                                                          |
+| -------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `token`              | `RENDER_API_KEY`      | Render API key.                                                                                                |
+| `ownerId`            | `RENDER_WORKSPACE_ID` | Workspace id (`tea-...`).                                                                                      |
+| `client`             | none                  | A pre-built `SandboxesClient` from `@renderinc/sdk`. Set `token` and `ownerId` on it; passing them too throws. |
+| `sandboxGroupId`     | workspace default     | Snapshots restore only inside the group they were captured in.                                                 |
+| `plan`               | `1c-2g`               | `1c-2g`, `2c-4g`, `4c-8g`, `8c-16g`, or a newer plan.                                                          |
+| `timeoutSeconds`     | `86400`               | Maximum continuous runtime. Render terminates the sandbox after it.                                            |
+| `idleTimeoutSeconds` | `900`                 | Render suspends an idle sandbox and keeps its disk. `0` turns off idle suspension.                             |
+| `networkPolicy`      | `allow-all`           | Egress when the policy allows network, for example an `allow-list`. A `deny` policy sends `deny-all`.          |
+| `buildName`          | none                  | Boot every new sandbox from this Render sandbox build (a custom image).                                        |
+| `snapshotName`       | none                  | Boot every new sandbox from this named snapshot.                                                               |
+| `snapshotKind`       | `filesystem`          | What `snapshot()` captures. `runtime` also keeps memory and processes, and needs the same `plan`.              |
+| `workdir`            | `/workspace`          | Where the `/workspace` virtual root maps. Created at boot.                                                     |
 
 Render makes its own `sbx-` ids, so `create` ignores the id that `ensure()`
 passes. Keep the returned id in your instance store.

@@ -75,6 +75,28 @@ describe('process', () => {
     )
   })
 
+  it('rejects bash read-only names, which would stop the command', () => {
+    expect(() => envFileContent({ UID: '1' })).toThrow(/invalid env var name/)
+  })
+
+  it('drops the rest of a stream once it passes the cap', async () => {
+    // A 3-byte first chunk keeps the 64 KiB pipe chunks off the cap, so room
+    // is left after the overflow; the pause makes TAIL its own chunk.
+    const r = await handle.process.exec(
+      'printf xyz; sleep 0.1; head -c 9000000 /dev/zero | tr "\\0" a; sleep 0.2; echo TAIL',
+    )
+    expect(r.stdout).not.toContain('TAIL')
+    expect(r.stderr).toContain('output truncated')
+  })
+
+  it('spawn with an aborted signal rejects instead of throwing', async () => {
+    let result: Promise<unknown> | undefined
+    expect(() => {
+      result = handle.process.spawn('true', { signal: AbortSignal.abort() })
+    }).not.toThrow()
+    await expect(result).rejects.toThrow()
+  })
+
   it('kill() stops a backgrounded child', async () => {
     const ticks = join(dir, 'ticks')
     const proc = await handle.process.spawn(

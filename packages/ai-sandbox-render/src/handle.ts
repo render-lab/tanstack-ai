@@ -82,6 +82,16 @@ export function q(value: string): string {
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+/** Bash read-only variables: exporting one fails, and the command never runs. */
+const READONLY_ENV = new Set([
+  'BASHOPTS',
+  'BASH_VERSINFO',
+  'EUID',
+  'PPID',
+  'SHELLOPTS',
+  'UID',
+])
+
 /**
  * `env` as a file of `export` lines for the wrapper to source. Names are
  * checked and values quoted, so a value cannot break out into shell code.
@@ -89,7 +99,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 export function envFileContent(env: Record<string, string>): string {
   return Object.entries(env)
     .map(([name, value]) => {
-      if (!ENV_NAME.test(name)) {
+      if (!ENV_NAME.test(name) || READONLY_ENV.has(name)) {
         throw new Error(`render: invalid env var name ${JSON.stringify(name)}`)
       }
       return `export ${name}=${q(value)}\n`
@@ -532,10 +542,11 @@ export class RenderHandle implements SandboxHandle {
     const signal = opts?.signal
     signal?.throwIfAborted()
     const out = { stdout: '', stderr: '' }
-    let truncated = false
+    // Once a stream hits the cap, drop the rest of it, not just one chunk.
+    const cut = { stdout: false, stderr: false }
     const running = this.run(command, opts, (stream, data) => {
-      if (out[stream].length + data.length > MAX_STREAM_BYTES) {
-        truncated = true
+      if (cut[stream] || out[stream].length + data.length > MAX_STREAM_BYTES) {
+        cut[stream] = true
         return
       }
       out[stream] += data
@@ -550,9 +561,10 @@ export class RenderHandle implements SandboxHandle {
       const exitCode = await running.exit
       return {
         stdout: out.stdout,
-        stderr: truncated
-          ? `${out.stderr}\n[render] output truncated\n`
-          : out.stderr,
+        stderr:
+          cut.stdout || cut.stderr
+            ? `${out.stderr}\n[render] output truncated\n`
+            : out.stderr,
         exitCode,
       }
     } catch (error) {
@@ -563,7 +575,7 @@ export class RenderHandle implements SandboxHandle {
     }
   }
 
-  private spawnProcess(
+  private async spawnProcess(
     command: string,
     opts?: ProcessOptions,
   ): Promise<SpawnHandle> {
@@ -593,7 +605,7 @@ export class RenderHandle implements SandboxHandle {
         ),
       )
 
-    return Promise.resolve({
+    return {
       // The process group id lives in the sandbox; a fabricated pid would be wrong.
       pid: -1,
       stdout: stdoutQ,
@@ -602,7 +614,7 @@ export class RenderHandle implements SandboxHandle {
       wait: () => exit,
       // Always TERM then KILL to the whole group; the requested signal is not honoured.
       kill: () => running.kill(),
-    })
+    }
   }
 
   snapshot = async (label?: string): Promise<SnapshotRef> => {

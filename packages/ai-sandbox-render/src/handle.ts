@@ -34,6 +34,7 @@ export const DEFAULT_WORKDIR = '/workspace'
 
 /** Prefix of every snapshot name this provider creates. */
 export const SNAPSHOT_PREFIX = 'tsai-'
+const SNAPSHOT_NAME_MAX = 64
 
 /** Byte cap per stream, for spawned processes and captured exec output. */
 const MAX_STREAM_BYTES = 8 * 1024 * 1024
@@ -593,7 +594,8 @@ export class RenderHandle implements SandboxHandle {
     const snap = await this.client.snapshots.create({
       sandboxId: this.id,
       kind: this.snapshotKind,
-      name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`,
+      // Render caps names at 64 characters; the full label stays in the ref.
+      name: `${SNAPSHOT_PREFIX}${label ?? 'snap'}`.slice(0, SNAPSHOT_NAME_MAX),
       wait: true,
     })
     return { id: snap.id, ...(label !== undefined ? { label } : {}) }

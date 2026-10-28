@@ -172,4 +172,11 @@ describe('capabilities', () => {
       wait: true,
     })
   })
+
+  it('keeps the snapshot name within 64 characters and the full label in the ref', async () => {
+    const label = 'x'.repeat(100)
+    expect((await handle.snapshot(label)).label).toBe(label)
+    const { name } = fake.client.snapshots.create.mock.calls[0][0]
+    expect(name).toBe(`tsai-${'x'.repeat(59)}`)
+  })
 })
